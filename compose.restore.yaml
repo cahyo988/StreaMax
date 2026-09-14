@@ -1,0 +1,10 @@
+services:
+  streamax:
+    volumes:
+      - streamax-data-restored:/data
+  streamax-maintenance:
+    volumes:
+      - streamax-data-restored:/data
+volumes:
+  streamax-data-restored:
+    name: ${STREAMAX_RESTORE_VOLUME:-streamax-data-restored}

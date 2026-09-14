@@ -1,0 +1,11 @@
+[Unit]
+Description=StreaMax consistent offline backup and optional offsite copy
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/streamax-backup.env
+ExecStart=/bin/sh /opt/streamax/scripts/automatic-backup.sh
+TimeoutStartSec=6h
+UMask=0077

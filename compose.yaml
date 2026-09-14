@@ -1,0 +1,37 @@
+services:
+  streamax:
+    build: .
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3000
+      DATA_DIR: /data
+      BACKUP_DIR: /backups
+      FFMPEG_PATH: ffmpeg
+      FFPROBE_PATH: ffprobe
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - streamax-data:/data
+      - ${BACKUP_PATH:-./backups}:/backups:ro
+    restart: unless-stopped
+    stop_grace_period: 30s
+    cpus: 4
+    mem_limit: 4g
+    pids_limit: 512
+    security_opt:
+      - no-new-privileges:true
+  streamax-maintenance:
+    profiles: [maintenance]
+    build: .
+    environment:
+      DATA_DIR: /data
+      BACKUP_DIR: /backups
+    volumes:
+      - streamax-data:/data
+      - ${BACKUP_PATH:-./backups}:/backups
+    entrypoint: ["sh"]
+    command: ["scripts/backup.sh"]
+    restart: "no"
+volumes:
+  streamax-data:
