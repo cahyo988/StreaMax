@@ -131,6 +131,17 @@ strong bootstrap secrets. Run `docker compose up -d --build`. The image includes
 FFmpeg, runs as the unprivileged `node` user, and uses `tini` for process reaping.
 SQLite and media live in the persistent `streamax-data` volume. Port 3000 is bound
 only to host loopback; it is intended for an HTTPS reverse proxy on the host.
+The default container budget is 2 CPUs and 1200 MiB RAM, with Node's JS heap capped
+at 384 MiB, leaving headroom for the OS and FFmpeg on a 2 GiB device. Override with
+`STREAMAX_CPUS`, `STREAMAX_MEMORY_LIMIT`, and `NODE_HEAP_MB` in `.env` when the host
+has more resources. For an entry-level STB, start with one active stream and a
+720p profile; software encoding and simultaneous outputs can exceed this budget.
+Check the STB architecture with `uname -m`. For an ARM64 STB, build on a Docker
+host with `docker buildx build --platform linux/arm64 --load -t streamax:release .`,
+then transfer the image using `docker save streamax:release -o streamax-release.tar`
+and `docker load -i streamax-release.tar` on the STB. Copy `compose.yaml` and a
+configured `.env` there, then run `docker compose up -d` (the image is named
+`streamax:release`). Use `linux/amd64` instead if `uname -m` reports `x86_64`.
 
 Example Caddy configuration (install Caddy on the host and point DNS at the VPS):
 
@@ -146,8 +157,8 @@ hostname and avoid proxy timeouts shorter than video normalization. Do not expos
 the Vite development server publicly. The app does not trust forwarded IP headers;
 behind a proxy, login rate limits apply to the proxy address collectively.
 
-The default Compose limits are 4 CPUs, 4 GiB RAM and 512 PIDs. Tune output capacity
-and encoding profiles to the VPS; two 1080p outputs can be substantially more
+The default Compose limits are 2 CPUs, 1200 MiB RAM and 256 PIDs. Tune output
+capacity and encoding profiles to the host; two 1080p outputs can be substantially more
 expensive than two 720p outputs. Encoding a 720p normalized source at 1080p does not
 recover source detail. Full-resolution ingestion is future work.
 

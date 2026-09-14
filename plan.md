@@ -171,9 +171,11 @@ notifications, maintenance-window backup automation, activity logs and Docker/CI
   and restore remain offline maintenance operations to protect database consistency.
   Live preview, upload pause/resume and Now Playing are available in stream/media views.
 - M24 Deployment — Dockerfile/Compose, env configuration, persistent volume,
-  resource limits, health checks, graceful shutdown and CI are present. Remaining:
-  automated TLS/proxy provisioning and a real VPS deployment; the local Docker
-  daemon was unavailable for a container build.
+  resource limits, health checks, graceful shutdown and CI are present. Release
+  image runs Node's built-in TypeScript stripping (so production does not need
+  devDependency `tsx`); Compose defaults are bounded for a 2 GiB host. Remaining:
+  automated TLS/proxy provisioning, real Docker image build/architecture validation,
+  and a real VPS deployment; the local Docker daemon was unavailable for a container build.
 - M25 Performance & Scalability — advanced scaling intentionally not implemented:
   no hardware encoder, multi-worker pool, Redis/PostgreSQL, cache or horizontal
   application replicas. The supported topology is one bounded server process.

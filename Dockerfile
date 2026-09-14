@@ -23,4 +23,4 @@ ENV HOST=0.0.0.0 PORT=3000 DATA_DIR=/data
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s CMD node -e "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "--import", "tsx", "server/index.ts"]
+CMD ["node", "--experimental-strip-types", "server/index.ts"]

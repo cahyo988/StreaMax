@@ -1,5 +1,6 @@
 services:
   streamax:
+    image: streamax:release
     build: .
     env_file: .env
     environment:
@@ -9,6 +10,7 @@ services:
       BACKUP_DIR: /backups
       FFMPEG_PATH: ffmpeg
       FFPROBE_PATH: ffprobe
+      NODE_OPTIONS: "--max-old-space-size=${NODE_HEAP_MB:-384}"
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
@@ -16,9 +18,9 @@ services:
       - ${BACKUP_PATH:-./backups}:/backups:ro
     restart: unless-stopped
     stop_grace_period: 30s
-    cpus: 4
-    mem_limit: 4g
-    pids_limit: 512
+    cpus: ${STREAMAX_CPUS:-2}
+    mem_limit: ${STREAMAX_MEMORY_LIMIT:-1200m}
+    pids_limit: 256
     security_opt:
       - no-new-privileges:true
   streamax-maintenance:
