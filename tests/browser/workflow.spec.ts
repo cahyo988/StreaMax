@@ -174,6 +174,15 @@ test("browser login, upload, playlist, destination, stream and schedule workflow
       .find((stream) => stream.name === "Evening broadcast")?.playCount,
   ).toBe(3);
   await expect(page.getByText("offline", { exact: true })).toBeVisible();
+  const createdStream = f.store
+    .list("streams")
+    .find((stream) => stream.name === "Evening broadcast")!;
+  // The closed test ingest may retry, but mode must still reflect real file inspection.
+  f.engine.start(createdStream.id);
+  await expect(
+    page.locator(".stream-row").filter({ hasText: "Evening broadcast" }),
+  ).toContainText("COPY");
+  await f.engine.stop(createdStream.id);
 
   await page
     .getByRole("navigation")

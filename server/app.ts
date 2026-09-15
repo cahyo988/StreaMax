@@ -39,6 +39,7 @@ import {
 } from "./security.ts";
 import { normalize, inspectMedia, needsTranscode } from "./media.ts";
 import { MediaQueue } from "./media-queue.ts";
+import { EncoderSlot } from "./encoder-slot.ts";
 import {
   Notifications,
   alertEvents,
@@ -258,7 +259,8 @@ export async function buildApp(
 ) {
   const store = new Store(config.DATA_DIR, config.ENCRYPTION_KEY);
   await store.bootstrap(config);
-  const engine = new Engine(store, config);
+  const encoderSlot = new EncoderSlot();
+  const engine = new Engine(store, config, encoderSlot);
   const thresholds = new ThresholdMonitor(store, config.DATA_DIR);
   const notifications = new Notifications(
     store,
@@ -1429,8 +1431,11 @@ export async function buildApp(
     }
     const alreadyBusy = mediaQueue.size() > 0;
     const result = mediaQueue.enqueue(async (signal) => {
+      let release: (() => void) | undefined;
       try {
         if (signal.aborted) throw new Error("Interrupted");
+        if (needsTranscode(inspection))
+          release = await encoderSlot.acquire(signal);
         store.save("videos", { ...video, status: "processing" });
         store.event(
           actor,
@@ -1459,6 +1464,17 @@ export async function buildApp(
           video.id,
           inspection,
           signal,
+          (progress) => {
+            const current = store.get("videos", video.id);
+            if (
+              current?.status === "processing" &&
+              progress > (current.processingProgress ?? -1)
+            )
+              store.save("videos", {
+                ...current,
+                processingProgress: progress,
+              });
+          },
         );
         const size = (await stat(metadata.path)).size;
         const ready = store.save("videos", {
@@ -1466,6 +1482,7 @@ export async function buildApp(
           ...metadata,
           size,
           status: "ready",
+          processingProgress: 100,
         });
         store.event(
           actor,
@@ -1496,6 +1513,7 @@ export async function buildApp(
         await unlink(join(mediaDir, `${video.id}.mp4`)).catch(() => {});
         return failed;
       } finally {
+        release?.();
         await unlink(stableInput).catch(() => {});
       }
     });

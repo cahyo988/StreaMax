@@ -15,6 +15,12 @@ export type MediaInspection = {
   channels: number | null;
   container: string;
   hasAudio: boolean;
+  channelLayout?: string;
+  videoTimeBase?: string;
+  audioTimeBase?: string;
+  videoExtraData?: string;
+  audioExtraData?: string;
+  sampleAspectRatio?: string;
 };
 const fpsOf = (value: unknown) => {
   const [a, b] = String(value ?? "0/1")
@@ -27,7 +33,10 @@ export function run(
   args: string[],
   timeout = 30_000,
   signal?: AbortSignal,
+  onOutput?: (chunk: string) => void,
 ): Promise<string> {
+  if (signal?.aborted)
+    return Promise.reject(new Error("Media processing interrupted"));
   return new Promise((resolve, reject) => {
     const child = spawn(binary, args, {
       windowsHide: true,
@@ -41,12 +50,19 @@ export function run(
     signal?.addEventListener("abort", cancel, { once: true });
     if (signal?.aborted) cancel();
     let timedOut = false;
+    let callbackFailed = false;
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGKILL");
     }, timeout);
     child.stdout.on("data", (c) => {
       output = (output + c).slice(-1_000_000);
+      try {
+        if (!callbackFailed) onOutput?.(c.toString());
+      } catch {
+        callbackFailed = true;
+        child.kill("SIGKILL");
+      }
     });
     child.stderr.on("data", (c) => {
       error = (error + c).slice(-4000);
@@ -59,7 +75,7 @@ export function run(
     child.on("close", (code) => {
       signal?.removeEventListener("abort", cancel);
       clearTimeout(timer);
-      code === 0 && !signal?.aborted && !timedOut
+      code === 0 && !signal?.aborted && !timedOut && !callbackFailed
         ? resolve(output)
         : reject(
             new Error(
@@ -72,19 +88,27 @@ export function run(
 export async function inspectMedia(
   config: Config,
   input: string,
+  signal?: AbortSignal,
 ): Promise<MediaInspection> {
   const probe = JSON.parse(
-    await run(config.FFPROBE_PATH, [
-      "-v",
-      "error",
-      "-protocol_whitelist",
-      "file,pipe",
-      "-show_format",
-      "-show_streams",
-      "-of",
-      "json",
-      input,
-    ]),
+    await run(
+      config.FFPROBE_PATH,
+      [
+        "-v",
+        "error",
+        "-protocol_whitelist",
+        "file,pipe",
+        "-show_format",
+        "-show_streams",
+        "-show_data_hash",
+        "sha256",
+        "-of",
+        "json",
+        input,
+      ],
+      30_000,
+      signal,
+    ),
   );
   const video = probe.streams?.find((s: any) => s.codec_type === "video");
   const audio = probe.streams?.find((s: any) => s.codec_type === "audio");
@@ -111,6 +135,12 @@ export async function inspectMedia(
     channels: audio?.channels ? Number(audio.channels) : null,
     container: String(probe.format?.format_name || ""),
     hasAudio: Boolean(audio),
+    channelLayout: audio?.channel_layout,
+    videoTimeBase: video.time_base,
+    audioTimeBase: audio?.time_base,
+    videoExtraData: video.extradata_hash,
+    audioExtraData: audio?.extradata_hash,
+    sampleAspectRatio: video.sample_aspect_ratio,
   };
 }
 export function needsTranscode(m: MediaInspection) {
@@ -135,15 +165,41 @@ export async function normalize(
   id: string,
   inspection?: MediaInspection,
   signal?: AbortSignal,
+  onProgress?: (percent: number) => void,
 ) {
   inspection ??= await inspectMedia(config, input);
   if (signal?.aborted) throw new Error("Media processing interrupted");
   const output = join(config.DATA_DIR, "media", `${id}.mp4`);
+  let progressBuffer = "";
+  const progress = (chunk: string) => {
+    progressBuffer += chunk;
+    const lines = progressBuffer.split("\n");
+    progressBuffer = (lines.pop() || "").slice(-4096);
+    for (const line of lines) {
+      const [key, value] = line.trim().split("=");
+      if (key === "out_time_us" && Number.isFinite(Number(value)))
+        onProgress?.(
+          Math.max(
+            0,
+            Math.min(
+              99,
+              Math.floor(
+                (Number(value) / 1_000_000 / inspection!.duration) * 100,
+              ),
+            ),
+          ),
+        );
+    }
+  };
   const args = [
     "-hide_banner",
     "-loglevel",
     "error",
     "-nostdin",
+    "-progress",
+    "pipe:1",
+    "-stats_period",
+    "2",
     "-protocol_whitelist",
     "file,pipe",
     "-i",
@@ -163,7 +219,7 @@ export async function normalize(
       output,
     );
     try {
-      await run(config.FFMPEG_PATH, args, 60 * 60 * 1000, signal);
+      await run(config.FFMPEG_PATH, args, 60 * 60 * 1000, signal, progress);
       return {
         ...inspection,
         container: "mp4",
@@ -211,7 +267,7 @@ export async function normalize(
     output,
   );
   try {
-    await run(config.FFMPEG_PATH, args, 60 * 60 * 1000, signal);
+    await run(config.FFMPEG_PATH, args, 60 * 60 * 1000, signal, progress);
   } catch (error) {
     await unlink(output).catch(() => {});
     throw error;

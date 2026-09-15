@@ -80,6 +80,15 @@ const indonesian: Record<string, string> = {
   Weekly: "Mingguan",
   Occurrences: "Jumlah jadwal",
   "Overlay text": "Teks overlay",
+  "Waiting for encoder": "Menunggu slot encoder",
+  inspecting: "Memeriksa video",
+  waiting_capacity: "Menunggu slot encoder",
+  "Leave overlay empty and watermark off for automatic stream copy. Realtime overlays require CPU encoding; on STB, try 720p24 or 960x540p30 if output is below realtime.":
+    "Kosongkan overlay dan matikan watermark untuk stream copy otomatis. Overlay realtime membutuhkan encoding CPU; pada STB, coba profil 720p24 atau 960x540p30 jika output terlalu lambat.",
+  "Live preview shows the source without overlays, using stream copy. Preview timing depends on source keyframes.":
+    "Preview menampilkan sumber tanpa overlay dengan stream copy. Jeda preview mengikuti keyframe sumber.",
+  "Below realtime: disable overlay or select a 720p24 / 960x540p30 profile":
+    "Output di bawah realtime: matikan overlay atau pilih profil 720p24 / 960x540p30",
   "Workspace logo watermark": "Watermark logo workspace",
   "Enable live preview": "Aktifkan preview langsung",
   "Overlay position": "Posisi overlay",
@@ -1088,6 +1097,19 @@ function App() {
               {stream.desired === "running" && (
                 <small>{t("Platform status is not verified")}</small>
               )}
+              {stream.outputs?.map((output: any) => (
+                <small key={`mode-${output.destinationId}`}>
+                  {lookup("destinations", output.destinationId)}:{" "}
+                  {output.mode?.toUpperCase() || output.state}
+                  {output.state === "waiting_capacity" &&
+                    ` · ${t("Waiting for encoder")}`}
+                  {Number.isFinite(output.speed) &&
+                    ` · ${output.speed.toFixed(2)}x`}
+                  {output.warning && (
+                    <span className="danger-text"> · {t(output.warning)}</span>
+                  )}
+                </small>
+              ))}
               {stream.livePreview && stream.desired === "running" && (
                 <LivePreview id={stream.id} />
               )}
@@ -1720,6 +1742,9 @@ function App() {
                               className={`badge ${video.status === "failed" ? "failed" : video.status && video.status !== "ready" ? "offline" : "live"}`}
                             >
                               {t(video.status || "Ready")}
+                              {video.status === "processing" &&
+                                Number.isFinite(video.processingProgress) &&
+                                ` ${video.processingProgress}%`}
                             </span>
                             {video.error && (
                               <small role="status">{video.error}</small>
@@ -3709,6 +3734,11 @@ function ResourceModal({
                   defaultValue={item?.overlayText || ""}
                 />
               </label>
+              <small>
+                {t(
+                  "Leave overlay empty and watermark off for automatic stream copy. Realtime overlays require CPU encoding; on STB, try 720p24 or 960x540p30 if output is below realtime.",
+                )}
+              </small>
               <label>
                 {t("Overlay position")}
                 <select
@@ -3738,6 +3768,11 @@ function ResourceModal({
                 />
                 {t("Enable live preview")}
               </label>
+              <small>
+                {t(
+                  "Live preview shows the source without overlays, using stream copy. Preview timing depends on source keyframes.",
+                )}
+              </small>
               <small>
                 {t(
                   "Each destination uses one worker output. Restarting begins the playlist again.",

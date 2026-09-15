@@ -1,0 +1,69 @@
+{
+  "architecture": "arm64",
+  "cpu": "Cortex-A53",
+  "logicalCpus": 4,
+  "seconds": 30,
+  "sink": "temporary local FLV (not network delivery)",
+  "results": [
+    {
+      "mode": "copy",
+      "exitCode": 0,
+      "thermalStopped": false,
+      "interrupted": false,
+      "wallSeconds": 31.33606598,
+      "deliveredFps": 28.784723665558225,
+      "reportedFps": 30.06,
+      "speed": 1,
+      "bitrateKbps": 3451.736407249467,
+      "cpuPercent": 4.636829654773403,
+      "peakMemoryMiB": 50.62890625,
+      "initialTemperatureC": 60,
+      "maxTemperatureC": 60
+    },
+    {
+      "mode": "ultrafast",
+      "exitCode": 0,
+      "thermalStopped": false,
+      "interrupted": false,
+      "wallSeconds": 40.71292741,
+      "deliveredFps": 22.106000655185998,
+      "reportedFps": 22.79,
+      "speed": 0.76,
+      "bitrateKbps": 2701.6223347547975,
+      "cpuPercent": 180.90814069515716,
+      "peakMemoryMiB": 89.15625,
+      "initialTemperatureC": 55,
+      "maxTemperatureC": 66
+    },
+    {
+      "mode": "veryfast",
+      "exitCode": 0,
+      "thermalStopped": false,
+      "interrupted": false,
+      "wallSeconds": 107.06803549899999,
+      "deliveredFps": 8.405870116188,
+      "reportedFps": 8.5,
+      "speed": 0.283,
+      "bitrateKbps": 2699.516524520256,
+      "cpuPercent": 188.6688207722712,
+      "peakMemoryMiB": 158.80859375,
+      "initialTemperatureC": 63,
+      "maxTemperatureC": 70
+    },
+    {
+      "mode": "540p30",
+      "exitCode": 0,
+      "thermalStopped": false,
+      "interrupted": false,
+      "wallSeconds": 40.534194662,
+      "deliveredFps": 22.203475547122,
+      "reportedFps": 22.84,
+      "speed": 0.762,
+      "bitrateKbps": 2701.811034115139,
+      "cpuPercent": 186.731229351296,
+      "peakMemoryMiB": 82.38671875,
+      "initialTemperatureC": 66,
+      "maxTemperatureC": 70
+    }
+  ]
+}

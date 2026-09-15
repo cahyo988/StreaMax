@@ -32,6 +32,9 @@ then run `npm start` and open that address. The server serves `dist/` when prese
 
 ## First broadcast
 
+For Cortex-A53/Armbian setup, COPY selection rules, CPU limits and the on-device
+benchmark, see [STB streaming](docs/stb-streaming.md).
+
 1. **Video library → Upload video.** Further uploads are accepted during processing.
    Multipart and resumable uploads share one FIFO processing worker. Compatible
    H.264/AAC 48 kHz stereo media up to 720p/30 FPS is remuxed to MP4 without re-encoding;
@@ -39,8 +42,8 @@ then run `npm start` and open that address. The server serves `dist/` when prese
    Watch queued/processing/ready/failed status in the library. Only ready media can
    be previewed or streamed. Temporary inputs are removed after completion or failure.
    Shutdown cancels pending work and waits for cleanup; interrupted jobs become failed
-   on restart and require re-upload. Automatic job recovery and percentage progress
-   are not implemented yet.
+   on restart and require re-upload. Percentage progress is polled from FFmpeg's
+   structured progress output. Automatic job recovery is not implemented yet.
 2. **Playlists → Create playlist.** Add library videos and reorder using arrows.
    Repeated items are supported. All items must use the managed library.
 3. **Destinations → Create destination.** Paste the provider's ingest server URL
@@ -51,9 +54,12 @@ then run `npm start` and open that address. The server serves `dist/` when prese
    destinations. For a one-video playlist, choose continuous looping, one playback,
    or a fixed total of 2-1,000 plays (including the first playback). Multi-video
    playlists can play once or loop continuously. Each destination consumes one
-   worker output and its own encoder. Preview uses one extra slot.
+   worker output. Compatible files without overlays use stream copy; CPU encoding
+   uses a single shared slot across all streams and upload processing. Preview
+   still counts toward output capacity but does not start an extra encoder.
 5. Optionally choose a PNG workspace logo watermark, a text overlay, or local HLS
-   preview. The preview is private to signed-in users and may lag behind RTMP.
+   preview. The preview is private to signed-in users and shows the original source
+   without overlays. It may lag behind RTMP depending on source keyframe spacing.
 6. Start the stream and check reception in your platform's studio. **Sending output
    means FFmpeg is making local frame progress**, not that viewers can watch. The
    dashboard reports that distinction and does not invent platform telemetry.

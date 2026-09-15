@@ -980,6 +980,13 @@ export const openApiDocument = {
             type: "string",
             enum: ["queued", "processing", "ready", "failed"],
           },
+          processingProgress: {
+            type: "integer",
+            minimum: 0,
+            maximum: 100,
+            description:
+              "Processing percentage; 100 only after successful finalization",
+          },
           error: { type: "string" },
           transcoded: { type: "boolean" },
         },

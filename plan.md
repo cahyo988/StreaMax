@@ -51,7 +51,7 @@ output retries/failures and schedule failures; threshold alerts and durable retr
 are implemented. Email delivery remains future work. M15's baseline reporting is implemented; platform audience
 metrics still require provider APIs, OAuth/application registration and operator
 credentials.
-The local HLS preview shows encoded output with a short delay; it does not confirm
+The local HLS preview copies source packets without realtime overlays; it does not confirm
 platform reception. FFmpeg progress confirms local output activity, not audience
 reach or platform health. RTMP pause is not supported; manual stop/start begins the
 playlist again. Unexpected process recovery resumes from persisted checkpoints.
@@ -75,7 +75,7 @@ playlist again. Unexpected process recovery resumes from persisted checkpoints.
 Implemented: React control panel, session authentication and team roles, SQLite
 persistence, resumable upload/normalize, ordered playlists, profiles, encrypted
 destinations, RTMP control, checkpoint recovery, recurring schedules, playback
-status and branded HLS preview, threshold monitoring, durable Telegram/Discord
+status and source HLS preview, threshold monitoring, durable Telegram/Discord
 notifications, maintenance-window backup automation, activity logs and Docker/CI.
 
 ### Module completion notes
@@ -182,7 +182,8 @@ notifications, maintenance-window backup automation, activity logs and Docker/CI
 - M26 Advanced Streaming — normalized uploaded MP4 to RTMP/RTMPS outputs is supported.
   Text overlays, PNG workspace-logo watermark, and authenticated local HLS preview
   are implemented and exercised through FFmpeg integration tests. Remaining:
-  network/HLS/RTSP/SRT inputs, SRT output, stream-copy mode and hardware encoding.
+  network/HLS/RTSP/SRT inputs, SRT output and hardware encoding. Stream-copy mode
+  is implemented under M32 below.
 - M27 Advanced Automation — one-time/daily/weekly schedules up to 366 occurrences,
   per-occurrence conflict validation and schedule-specific playlists are implemented.
   Remaining: conditional rules,
@@ -217,13 +218,39 @@ notifications, maintenance-window backup automation, activity logs and Docker/CI
   Failed inspection preserves the resumable source. Shutdown aborts child processes
   and awaits cleanup before database closure. Restart marks interrupted jobs failed;
   re-upload is required. Pending media cannot be deleted, pruned or streamed.
-  Remaining: durable queue persistence and FFmpeg progress percentage/SSE.
-  Bug-fix verification: build and all 64 tests pass, including real MP4/MKV remux,
+  FFmpeg progress percentage is now exposed through existing API/UI polling.
+  Remaining: durable queue persistence and SSE.
+  Bug-fix verification includes real MP4/MKV remux,
   FIFO/failure isolation, multipart plus resumable uploads, preserved source after
   inspection failure, and active FFmpeg shutdown/restart cleanup. A 350 MB upload
   on the target 2 GiB STB still needs a device-level smoke test.
 
-Verification: TypeScript and production UI build; 68 passing API/security/worker,
+- M32 Low-power STB Streaming — implementation complete; device acceptance in progress:
+  - [x] M1: FFprobe each source; automatic COPY for matching H.264/AAC without overlay,
+    conditional scale/drawtext/FPS conversion; inspect concatenation parameters.
+  - [x] M2: preserve both upload paths/FIFO; one shared CPU encoder slot across
+    normalization and streaming. COPY bypasses the slot; pending encoding waits.
+  - [x] M3: upload/queued/processing/ready/failed stay distinct; stream mode, speed
+    and capacity waits are visible. Preview copies unbranded source without another encoder.
+  - [x] M4 implementation: ultrafast default CPU fallback, threads remain 2;
+    low-speed warning and manually selectable 720p24/960x540p30 profiles.
+  - [x] M5: structured FFmpeg progress percentage in existing video API/UI polling.
+  - [x] Benchmark tooling with COPY/ultrafast/veryfast, CPU/RSS/FPS/bitrate/speed/thermal
+    readings and automatic 80°C stop. See docs/stb-streaming.md for behavior changes.
+  - [x] Actual STB benchmark: COPY 1.00× / 4.66% CPU vs veryfast 0.281× / 188.40% CPU;
+    initial 30-second media runs peaked at 57°C (COPY) and 69°C (veryfast).
+    Follow-up captured RSS and confirmed COPY 30.06 FPS / 4.64% CPU / 50.6 MiB RSS.
+    Overlay fallback measurements: 540p30 only 22.84 FPS (0.762×), 720p24 only
+    20.58 FPS (0.858×). Neither is realtime on this source; pre-render branding on
+    the laptop and use COPY for reliable STB streaming. Raw reports in docs/benchmarks/.
+  - [ ] Provider ingest and long-duration thermal soak acceptance.
+  - [ ] Deploy application changes to the STB container; only diagnostic/benchmark
+    scripts were copied for measurement. Preserve its existing Dockerfile/Compose edits.
+  - Notes: COPY retains source bitrate/GOP; preview excludes overlays; CPU live streams
+    hold the single encoder slot until stopped. Mixed-codec/time-base concat inputs
+    require preparing matching files. No hardware encoder assumptions or resource-limit increases.
+
+Verification: TypeScript and production UI build; 77 passing API/security/worker,
 OpenAPI contract, retention, audit-filter/export, recurring schedule, resumable upload,
 threshold/notification retry and timezone/DST tests; real FFmpeg upload-to-local-RTMP,
 authenticated HLS preview and text/logo overlay integration; database migration tests;

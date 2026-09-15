@@ -23,6 +23,9 @@ export function configuration(env = process.env) {
       MAX_OUTPUTS: z.coerce.number().int().min(1).max(32).default(4),
       FFMPEG_PATH: z.string().default("ffmpeg"),
       FFPROBE_PATH: z.string().default("ffprobe"),
+      STREAM_PRESET: z
+        .enum(["ultrafast", "superfast", "veryfast"])
+        .default("ultrafast"),
     })
     .parse(env);
   const dataDir = resolve(parsed.DATA_DIR);

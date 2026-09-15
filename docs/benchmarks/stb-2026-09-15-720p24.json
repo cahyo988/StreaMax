@@ -1,0 +1,24 @@
+{
+  "architecture": "arm64",
+  "cpu": "Cortex-A53",
+  "logicalCpus": 4,
+  "seconds": 30,
+  "sink": "temporary local FLV (not network delivery)",
+  "results": [
+    {
+      "mode": "720p24",
+      "exitCode": 0,
+      "thermalStopped": false,
+      "interrupted": false,
+      "wallSeconds": 36.117061373999995,
+      "deliveredFps": 19.93517668960506,
+      "reportedFps": 20.58,
+      "speed": 0.858,
+      "bitrateKbps": 2701.5407782515995,
+      "cpuPercent": 184.64957408746687,
+      "peakMemoryMiB": 89.78125,
+      "initialTemperatureC": 60,
+      "maxTemperatureC": 67
+    }
+  ]
+}

@@ -13,6 +13,9 @@ import { Store, type Entity } from "./store.ts";
 import type { Config } from "./config.ts";
 import { pruneExpiredVideos } from "./retention.ts";
 import { playbackPosition } from "./playback.ts";
+import { inspectMedia, type MediaInspection } from "./media.ts";
+import { selectStreamMode, type StreamPlan } from "./stream-mode.ts";
+import { EncoderSlot } from "./encoder-slot.ts";
 
 export type Output = {
   destinationId: string;
@@ -28,6 +31,12 @@ export type Output = {
   connectionStartedAt?: string;
   positionSeconds?: number;
   lastCheckpointAt?: number;
+  mode?: "copy" | "transcode";
+  modeReasons?: string[];
+  speed?: number;
+  warning?: string;
+  controller?: AbortController;
+  preparing?: Promise<void>;
 };
 export function ffmpegArgs(
   playlist: string,
@@ -42,30 +51,46 @@ export function ffmpegArgs(
     logoFile?: string;
     position?: string;
     preview?: string;
+    plan?: StreamPlan;
+    preset?: string;
   },
 ) {
   const right = playback?.position?.endsWith("right");
   const bottom = playback?.position?.startsWith("bottom");
-  const filters = [`scale=${profile.width}:${profile.height}`];
+  const plan =
+    playback?.plan ||
+    selectStreamMode(
+      [],
+      profile as any,
+      Boolean(playback?.textFile || playback?.logoFile),
+    );
+  const copy =
+    plan.mode === "copy" && !playback?.textFile && !playback?.logoFile;
+  const filters: string[] = plan.resize
+    ? [`scale=${profile.width}:${profile.height}`]
+    : [];
+  if (plan.reasons.includes("pixel aspect ratio")) filters.push("setsar=1");
   if (playback?.textFile)
     filters.push(
       `drawtext=textfile=${playback.textFile}:expansion=none:fontcolor=white:fontsize=28:box=1:boxcolor=black@0.5:x=${right ? "w-tw-20" : "20"}:y=${bottom ? "h-th-20" : "20"}`,
     );
-  const videoFilter = filters.join(",");
-  const complex = Boolean(playback?.logoFile || playback?.preview);
+  const videoFilter = filters.join(",") || "null";
+  const complex = Boolean(playback?.logoFile);
   const rendered = playback?.logoFile
     ? `[0:v]${videoFilter}[base];movie=${playback.logoFile},scale=160:-1,format=rgba,colorchannelmixer=aa=0.75[logo];[base][logo]overlay=${right ? "W-w-20" : "20"}:${bottom ? "H-h-70" : "70"}[rendered]`
     : `[0:v]${videoFilter}[rendered]`;
-  const graph =
-    rendered +
-    (playback?.preview
-      ? ";[rendered]split[branded][previewInput];[previewInput]scale=640:360[preview]"
-      : ";[rendered]null[branded]");
+  const graph = rendered + ";[rendered]null[branded]";
   return [
     "-hide_banner",
     "-nostdin",
     "-loglevel",
     "warning",
+    "-filter_threads",
+    "1",
+    "-filter_complex_threads",
+    "1",
+    "-threads",
+    "2",
     "-re",
     ...(loop
       ? ["-stream_loop", "-1"]
@@ -76,41 +101,50 @@ export function ffmpegArgs(
     "concat",
     "-safe",
     "1",
+    "-protocol_whitelist",
+    "file,pipe",
     ...(playback?.offset ? ["-ss", String(playback.offset)] : []),
     "-i",
     playlist,
     ...(playback?.remaining !== undefined
       ? ["-t", String(playback.remaining)]
       : []),
-    ...(complex
-      ? ["-filter_complex", graph, "-map", "[branded]"]
-      : ["-map", "0:v:0", "-vf", videoFilter]),
+    ...(copy
+      ? ["-map", "0:v:0"]
+      : complex
+        ? ["-filter_complex", graph, "-map", "[branded]"]
+        : ["-map", "0:v:0", ...(filters.length ? ["-vf", videoFilter] : [])]),
     "-map",
     "0:a:0",
-    "-r",
-    String(profile.fps),
-    "-c:v",
-    "libx264",
-    "-threads",
-    "2",
-    "-preset",
-    "veryfast",
-    "-pix_fmt",
-    "yuv420p",
-    "-b:v",
-    `${profile.bitrate}k`,
-    "-maxrate",
-    `${profile.bitrate}k`,
-    "-bufsize",
-    `${profile.bitrate * 2}k`,
-    "-g",
-    String(profile.fps * 2),
-    "-c:a",
-    "aac",
-    "-b:a",
-    `${profile.audioBitrate}k`,
-    "-ar",
-    "48000",
+    ...(copy
+      ? ["-c:v", "copy", "-c:a", "copy"]
+      : [
+          ...(plan.changeFps ? ["-r", String(profile.fps)] : []),
+          "-c:v",
+          "libx264",
+          "-threads",
+          "2",
+          "-preset",
+          playback?.preset || "ultrafast",
+          "-pix_fmt",
+          "yuv420p",
+          "-b:v",
+          `${profile.bitrate}k`,
+          "-maxrate",
+          `${profile.bitrate}k`,
+          "-bufsize",
+          `${profile.bitrate * 2}k`,
+          "-g",
+          String(profile.fps * 2),
+          "-c:a",
+          "aac",
+          "-b:a",
+          `${profile.audioBitrate}k`,
+          "-ar",
+          "48000",
+          "-ac",
+          "2",
+        ]),
     "-progress",
     "pipe:1",
     "-stats_period",
@@ -123,25 +157,13 @@ export function ffmpegArgs(
     ...(playback?.preview
       ? [
           "-map",
-          "[preview]",
+          "0:v:0",
           "-map",
           "0:a:0",
           "-c:v",
-          "libx264",
-          "-threads",
-          "1",
-          "-preset",
-          "ultrafast",
-          "-r",
-          "15",
-          "-g",
-          "30",
-          "-b:v",
-          "500k",
+          "copy",
           "-c:a",
-          "aac",
-          "-b:a",
-          "96k",
+          "copy",
           ...(playback.remaining !== undefined
             ? ["-t", String(playback.remaining)]
             : []),
@@ -171,6 +193,7 @@ export class Engine {
   constructor(
     private store: Store,
     private config: Config,
+    private encoderSlot = new EncoderSlot(),
   ) {}
   status(id: string) {
     const stream = this.store.get("streams", id);
@@ -180,17 +203,19 @@ export class Engine {
     const videos = (playlist?.videoIds || [])
       .map((videoId: string) => this.store.get("videos", videoId))
       .filter(Boolean);
-    return (this.outputs.get(id) || []).map(({ child, timer, ...output }) => ({
-      ...output,
-      platformVerified: false,
-      outputStatus: output.state === "live" ? "sending" : output.state,
-      nowPlaying: playbackPosition(
-        videos,
-        output.positionSeconds || 0,
-        stream?.loop,
-        stream?.playCount || 1,
-      ),
-    }));
+    return (this.outputs.get(id) || []).map(
+      ({ child, timer, controller, preparing, ...output }) => ({
+        ...output,
+        platformVerified: false,
+        outputStatus: output.state === "live" ? "sending" : output.state,
+        nowPlaying: playbackPosition(
+          videos,
+          output.positionSeconds || 0,
+          stream?.loop,
+          stream?.playCount || 1,
+        ),
+      }),
+    );
   }
   validate(stream: Entity) {
     const playlist = this.store.get(
@@ -302,6 +327,24 @@ export class Engine {
     for (const output of outputs) this.launch(id, file, output);
   }
   private launch(id: string, file: string, output: Output) {
+    const controller = new AbortController();
+    output.controller = controller;
+    output.preparing = this.prepareLaunch(
+      id,
+      file,
+      output,
+      controller.signal,
+    ).catch(() => {
+      if (!controller.signal.aborted && this.outputs.get(id)?.includes(output))
+        this.fail(id, file, output);
+    });
+  }
+  private async prepareLaunch(
+    id: string,
+    file: string,
+    output: Output,
+    signal: AbortSignal,
+  ) {
     const stream = this.store.get("streams", id)!;
     const destination = this.store.get("destinations", output.destinationId)!;
     const profile = this.store.get("profiles", stream.profileId)!;
@@ -331,100 +374,174 @@ export class Engine {
       this.fail(id, file, output);
       return;
     }
-    const child = spawn(
-      this.config.FFMPEG_PATH,
-      ffmpegArgs(file, profile, url, true, undefined, {
-        offset: duration ? position % duration : 0,
-        remaining,
-        textFile: stream.overlayText ? `${id}-overlay.txt` : undefined,
-        logoFile: stream.watermark ? `${id}-logo.png` : undefined,
-        position: stream.overlayPosition,
-        preview:
-          stream.livePreview &&
-          stream.destinationIds[0] === output.destinationId
-            ? join(this.config.DATA_DIR, "preview", id, "live.m3u8")
-            : undefined,
-      }),
-      {
-        cwd: join(this.config.DATA_DIR, "media"),
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      },
+    output.state = "inspecting";
+    const sources: MediaInspection[] = [];
+    for (const videoId of playlist.videoIds) {
+      if (signal.aborted) return;
+      sources.push(
+        await inspectMedia(
+          this.config,
+          join(this.config.DATA_DIR, "media", `${videoId}.mp4`),
+          signal,
+        ),
+      );
+    }
+    // The concat demuxer cannot safely join different codec/time bases.
+    if (
+      sources.some(
+        (m) =>
+          m.codec !== sources[0].codec ||
+          m.audioCodec !== sources[0].audioCodec ||
+          m.videoTimeBase !== sources[0].videoTimeBase ||
+          m.audioTimeBase !== sources[0].audioTimeBase ||
+          !m.hasAudio,
+      )
+    ) {
+      output.state = "failed";
+      output.warning =
+        "Playlist media needs matching codecs and time bases; prepare matching files before streaming";
+      this.store.event(
+        "worker",
+        "output.incompatible_playlist",
+        id,
+        output.warning,
+      );
+      return;
+    }
+    const plan = selectStreamMode(
+      sources,
+      profile as any,
+      Boolean(stream.overlayText || stream.watermark),
     );
-    output.child = child;
-    output.state = "starting";
-    output.lastProgress = Date.now();
-    let buffer = "";
-    let settled = false;
-    let lastFrame = 0;
-    child.stdout!.on("data", (chunk) => {
-      buffer += chunk.toString();
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines) {
-        const [key, value] = line.trim().split("=");
-        if (key === "fps") output.fps = Number(value);
-        if (key === "bitrate") output.bitrate = value;
-        if (key === "out_time") output.elapsed = value;
-        if (key === "out_time_us" && Number.isFinite(Number(value))) {
-          output.positionSeconds =
-            position + Math.max(0, Number(value) / 1_000_000);
-          if (Date.now() - (output.lastCheckpointAt || 0) >= 5000)
-            this.checkpoint(id, output);
-        }
-        if (key === "frame" && Number(value) > lastFrame) {
-          lastFrame = Number(value);
-          if (output.state !== "live") {
-            output.state = "live";
-            output.connectionStartedAt = new Date().toISOString();
-            this.store.event(
-              "worker",
-              "destination.connection.start",
-              output.destinationId,
-              destination.name,
-            );
+    output.mode = plan.mode;
+    output.modeReasons = plan.reasons;
+    let release: (() => void) | undefined;
+    if (plan.mode === "transcode") {
+      output.state = "waiting_capacity";
+      release = await this.encoderSlot.acquire(signal);
+    }
+    if (signal.aborted) {
+      release?.();
+      return;
+    }
+    try {
+      this.store.event(
+        "worker",
+        "output.mode",
+        id,
+        `${output.destinationId}: ${plan.mode}; ${plan.reasons.join(", ")}`,
+      );
+      const child = spawn(
+        this.config.FFMPEG_PATH,
+        ffmpegArgs(file, profile, url, true, undefined, {
+          offset: duration ? position % duration : 0,
+          remaining,
+          plan,
+          preset: this.config.STREAM_PRESET,
+          textFile: stream.overlayText ? `${id}-overlay.txt` : undefined,
+          logoFile: stream.watermark ? `${id}-logo.png` : undefined,
+          position: stream.overlayPosition,
+          preview:
+            stream.livePreview &&
+            stream.destinationIds[0] === output.destinationId
+              ? join(this.config.DATA_DIR, "preview", id, "live.m3u8")
+              : undefined,
+        }),
+        {
+          cwd: join(this.config.DATA_DIR, "media"),
+          windowsHide: true,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      output.child = child;
+      output.state = "starting";
+      output.lastProgress = Date.now();
+      let buffer = "";
+      let settled = false;
+      let lastFrame = 0;
+      child.stdout!.on("data", (chunk) => {
+        buffer += chunk.toString();
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const [key, value] = line.trim().split("=");
+          if (key === "fps") output.fps = Number(value);
+          if (key === "speed") {
+            const speed = Number.parseFloat(value);
+            if (Number.isFinite(speed)) {
+              output.speed = speed;
+              output.warning =
+                plan.mode === "transcode" && speed < 0.9
+                  ? "Below realtime: disable overlay or select a 720p24 / 960x540p30 profile"
+                  : undefined;
+            }
           }
-          output.lastProgress = Date.now();
-          if (Date.now() - (output.lastMetricAt || 0) >= 30_000) {
-            this.store.metric(
-              id,
-              output.destinationId,
-              output.fps,
-              output.bitrate,
-              output.elapsed,
-            );
-            output.lastMetricAt = Date.now();
+          if (key === "bitrate") output.bitrate = value;
+          if (key === "out_time") output.elapsed = value;
+          if (key === "out_time_us" && Number.isFinite(Number(value))) {
+            output.positionSeconds =
+              position + Math.max(0, Number(value) / 1_000_000);
+            if (Date.now() - (output.lastCheckpointAt || 0) >= 5000)
+              this.checkpoint(id, output);
+          }
+          if (key === "frame" && Number(value) > lastFrame) {
+            lastFrame = Number(value);
+            if (output.state !== "live") {
+              output.state = "live";
+              output.connectionStartedAt = new Date().toISOString();
+              this.store.event(
+                "worker",
+                "destination.connection.start",
+                output.destinationId,
+                destination.name,
+              );
+            }
+            output.lastProgress = Date.now();
+            if (Date.now() - (output.lastMetricAt || 0) >= 30_000) {
+              this.store.metric(
+                id,
+                output.destinationId,
+                output.fps,
+                output.bitrate,
+                output.elapsed,
+              );
+              output.lastMetricAt = Date.now();
+            }
           }
         }
-      }
-    });
-    // Raw FFmpeg diagnostics may include credentials outside URLs. Persist only
-    // controlled lifecycle messages; progress is parsed separately above.
-    child.stderr!.resume();
-    const finish = (code: number | null) => {
-      if (settled) return;
-      settled = true;
-      this.checkpoint(id, output);
-      output.child = undefined;
-      if (output.connectionStartedAt) {
-        this.store.event(
-          "worker",
-          "destination.connection.stop",
-          output.destinationId,
-          destination.name,
-        );
-        output.connectionStartedAt = undefined;
-      }
-      if (this.closed || this.outputs.get(id)?.includes(output) !== true)
-        return;
-      if (code === 0 && !stream.loop) {
-        output.state = "completed";
-        if (this.outputs.get(id)!.every((o) => o.state === "completed"))
-          void this.stop(id, "worker");
-      } else this.fail(id, file, output);
-    };
-    child.on("error", () => finish(-1));
-    child.on("close", finish);
+      });
+      // Raw FFmpeg diagnostics may include credentials outside URLs. Persist only
+      // controlled lifecycle messages; progress is parsed separately above.
+      child.stderr!.resume();
+      const finish = (code: number | null) => {
+        if (settled) return;
+        settled = true;
+        release?.();
+        this.checkpoint(id, output);
+        output.child = undefined;
+        if (output.connectionStartedAt) {
+          this.store.event(
+            "worker",
+            "destination.connection.stop",
+            output.destinationId,
+            destination.name,
+          );
+          output.connectionStartedAt = undefined;
+        }
+        if (this.closed || this.outputs.get(id)?.includes(output) !== true)
+          return;
+        if (code === 0 && !stream.loop) {
+          output.state = "completed";
+          if (this.outputs.get(id)!.every((o) => o.state === "completed"))
+            void this.stop(id, "worker");
+        } else this.fail(id, file, output);
+      };
+      child.on("error", () => finish(-1));
+      child.on("close", finish);
+    } catch (error) {
+      release?.();
+      throw error;
+    }
   }
   private fail(id: string, file: string, output: Output) {
     const retryAttempts = Number(
@@ -494,6 +611,8 @@ export class Engine {
     await Promise.all(
       outputs.map(async (output) => {
         clearTimeout(output.timer);
+        output.controller?.abort();
+        await output.preparing;
         const child = output.child;
         if (!child || child.exitCode !== null) return;
         await new Promise<void>((resolve) => {
