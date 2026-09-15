@@ -19,6 +19,7 @@ export function pruneExpiredVideos(
     if (
       !/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(video.id) ||
       !Number.isFinite(createdAt) ||
+      ["queued", "processing", "uploaded"].includes(video.status) ||
       createdAt >= expiresBefore ||
       referenced.has(video.id)
     )

@@ -1,36 +1,65 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
+import { unlink } from "node:fs/promises";
 import type { Config } from "./config.ts";
 
+export type MediaInspection = {
+  duration: number;
+  width: number;
+  height: number;
+  fps: number;
+  codec: string;
+  audioCodec: string | null;
+  pixelFormat: string | null;
+  sampleRate: number | null;
+  channels: number | null;
+  container: string;
+  hasAudio: boolean;
+};
+const fpsOf = (value: unknown) => {
+  const [a, b] = String(value ?? "0/1")
+    .split("/")
+    .map(Number);
+  return b && Number.isFinite(a / b) ? a / b : Number(value) || 0;
+};
 export function run(
   binary: string,
   args: string[],
   timeout = 30_000,
+  signal?: AbortSignal,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(binary, args, {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    let output = "";
-    let error = "";
-    const timer = setTimeout(() => {
+    let output = "",
+      error = "";
+    const cancel = () => {
       child.kill("SIGKILL");
-      reject(new Error("Media processing timed out"));
+    };
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) cancel();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
     }, timeout);
-    child.stdout.on("data", (chunk) => {
-      output = (output + chunk).slice(-1_000_000);
+    child.stdout.on("data", (c) => {
+      output = (output + c).slice(-1_000_000);
     });
-    child.stderr.on("data", (chunk) => {
-      error = (error + chunk).slice(-4000);
+    child.stderr.on("data", (c) => {
+      error = (error + c).slice(-4000);
     });
-    child.on("error", (err) => {
+    child.on("error", (e) => {
+      signal?.removeEventListener("abort", cancel);
       clearTimeout(timer);
-      reject(err);
+      reject(e);
     });
     child.on("close", (code) => {
+      signal?.removeEventListener("abort", cancel);
       clearTimeout(timer);
-      code === 0
+      code === 0 && !signal?.aborted && !timedOut
         ? resolve(output)
         : reject(
             new Error(
@@ -40,7 +69,10 @@ export function run(
     });
   });
 }
-export async function normalize(config: Config, input: string, id: string) {
+export async function inspectMedia(
+  config: Config,
+  input: string,
+): Promise<MediaInspection> {
   const probe = JSON.parse(
     await run(config.FFPROBE_PATH, [
       "-v",
@@ -54,15 +86,59 @@ export async function normalize(config: Config, input: string, id: string) {
       input,
     ]),
   );
-  const video = probe.streams.find((s: any) => s.codec_type === "video");
-  const hasAudio = probe.streams.some((s: any) => s.codec_type === "audio");
+  const video = probe.streams?.find((s: any) => s.codec_type === "video");
+  const audio = probe.streams?.find((s: any) => s.codec_type === "audio");
+  const duration = Number(probe.format?.duration);
   if (
     !video ||
-    !Number.isFinite(Number(probe.format.duration)) ||
-    Number(probe.format.duration) <= 0
+    !Number.isFinite(duration) ||
+    duration <= 0 ||
+    !Number.isFinite(Number(video.width)) ||
+    Number(video.width) <= 0 ||
+    !Number.isFinite(Number(video.height)) ||
+    Number(video.height) <= 0
   )
     throw new Error("A finite video file is required");
-  const path = join(config.DATA_DIR, "media", `${id}.mp4`);
+  return {
+    duration,
+    width: Number(video.width),
+    height: Number(video.height),
+    fps: fpsOf(video.avg_frame_rate || video.r_frame_rate),
+    codec: String(video.codec_name || ""),
+    audioCodec: audio?.codec_name ?? null,
+    pixelFormat: video.pix_fmt ?? null,
+    sampleRate: audio?.sample_rate ? Number(audio.sample_rate) : null,
+    channels: audio?.channels ? Number(audio.channels) : null,
+    container: String(probe.format?.format_name || ""),
+    hasAudio: Boolean(audio),
+  };
+}
+export function needsTranscode(m: MediaInspection) {
+  return (
+    m.codec !== "h264" ||
+    m.audioCodec !== "aac" ||
+    !Number.isFinite(m.width) ||
+    m.width <= 0 ||
+    m.height <= 0 ||
+    m.fps <= 0 ||
+    m.width > 1280 ||
+    m.height > 720 ||
+    m.fps > 30.01 ||
+    m.pixelFormat !== "yuv420p" ||
+    m.sampleRate !== 48000 ||
+    m.channels !== 2
+  );
+}
+export async function normalize(
+  config: Config,
+  input: string,
+  id: string,
+  inspection?: MediaInspection,
+  signal?: AbortSignal,
+) {
+  inspection ??= await inspectMedia(config, input);
+  if (signal?.aborted) throw new Error("Media processing interrupted");
+  const output = join(config.DATA_DIR, "media", `${id}.mp4`);
   const args = [
     "-hide_banner",
     "-loglevel",
@@ -73,12 +149,39 @@ export async function normalize(config: Config, input: string, id: string) {
     "-i",
     input,
   ];
-  if (!hasAudio) args.push("-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo");
+  if (!needsTranscode(inspection)) {
+    args.push(
+      "-map",
+      "0:v:0",
+      "-map",
+      "0:a:0",
+      "-c",
+      "copy",
+      "-movflags",
+      "+faststart",
+      "-y",
+      output,
+    );
+    try {
+      await run(config.FFMPEG_PATH, args, 60 * 60 * 1000, signal);
+      return {
+        ...inspection,
+        container: "mp4",
+        path: output,
+        transcoded: false,
+      };
+    } catch {
+      await unlink(output).catch(() => {});
+      throw new Error("Compatible media could not be remuxed");
+    }
+  }
+  if (!inspection.hasAudio)
+    args.push("-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo");
   args.push(
     "-map",
     "0:v:0",
     "-map",
-    hasAudio ? "0:a:0" : "1:a:0",
+    inspection.hasAudio ? "0:a:0" : "1:a:0",
     "-vf",
     "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1",
     "-r",
@@ -105,16 +208,27 @@ export async function normalize(config: Config, input: string, id: string) {
     "-movflags",
     "+faststart",
     "-y",
-    path,
+    output,
   );
-  await run(config.FFMPEG_PATH, args, 60 * 60 * 1000);
+  try {
+    await run(config.FFMPEG_PATH, args, 60 * 60 * 1000, signal);
+  } catch (error) {
+    await unlink(output).catch(() => {});
+    throw error;
+  }
   return {
-    duration: Number(probe.format.duration),
+    duration: inspection.duration,
     width: 1280,
     height: 720,
     fps: 30,
     codec: "h264",
     audioCodec: "aac",
-    path,
+    pixelFormat: "yuv420p",
+    sampleRate: 48000,
+    channels: 2,
+    container: "mp4",
+    hasAudio: true,
+    path: output,
+    transcoded: true,
   };
 }

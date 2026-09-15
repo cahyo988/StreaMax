@@ -1,4 +1,10 @@
 const success = { description: "Request succeeded" };
+const videoAccepted = {
+  description: "Video registered; poll the library until ready or failed",
+  content: {
+    "application/json": { schema: { $ref: "#/components/schemas/Video" } },
+  },
+};
 const errors = {
   "400": { description: "Invalid request" },
   "401": { description: "Authentication required" },
@@ -449,9 +455,22 @@ export const openApiDocument = {
       },
     },
     "/videos": {
-      get: operation("List video library", "listVideos", false, "EntityList"),
+      get: operation(
+        "List video library and processing status",
+        "listVideos",
+        false,
+        "VideoList",
+      ),
       post: {
-        ...operation("Upload and normalize a video", "uploadVideo", true),
+        ...operation("Upload and queue video processing", "uploadVideo", true),
+        responses: {
+          "201": videoAccepted,
+          ...errors,
+          "413": { description: "Upload size limit exceeded" },
+          "507": { description: "Insufficient disk space" },
+        },
+        description:
+          "Returns the video entity with status queued, processing, ready or failed. Poll GET /videos for completion; only ready videos can be played.",
         requestBody: {
           required: true,
           content: {
@@ -519,10 +538,17 @@ export const openApiDocument = {
     "/uploads/{id}/complete": {
       post: {
         ...operation(
-          "Validate, normalize and save a complete upload",
+          "Validate and register a completed upload for processing",
           "completeUpload",
           true,
         ),
+        responses: {
+          "201": videoAccepted,
+          ...errors,
+          "507": { description: "Insufficient disk space" },
+        },
+        description:
+          "Returns the video entity directly (including id and status). Transcoding runs in the background. Poll GET /videos for queued/processing/ready/failed status.",
         parameters: [...writeHeaders, idPathParameter],
       },
     },
@@ -943,6 +969,25 @@ export const openApiDocument = {
       EntityList: {
         type: "array",
         items: { $ref: "#/components/schemas/Object" },
+      },
+      Video: {
+        type: "object",
+        required: ["id", "name", "status"],
+        properties: {
+          id: { type: "string", format: "uuid" },
+          name: { type: "string" },
+          status: {
+            type: "string",
+            enum: ["queued", "processing", "ready", "failed"],
+          },
+          error: { type: "string" },
+          transcoded: { type: "boolean" },
+        },
+        additionalProperties: true,
+      },
+      VideoList: {
+        type: "array",
+        items: { $ref: "#/components/schemas/Video" },
       },
       AuditEventList: {
         type: "array",

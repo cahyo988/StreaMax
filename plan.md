@@ -209,13 +209,26 @@ notifications, maintenance-window backup automation, activity logs and Docker/CI
 - M30 Production Hardening — security/recovery foundations are implemented, not
   production-certified. Remaining: VPS firewall/TLS exercise, backup restore drill,
   distributed tracing, formal migrations/rollback and long-duration reliability.
+- M31 Smart Media Processing — implemented: FFprobe compatibility inspection,
+  stream-copy/remux for compatible MP4/H.264/AAC media, bounded normalization only
+  when required, and an in-process FIFO media queue with concurrency 1 shared by
+  multipart and resumable uploads. UI shows queued/processing/ready/failed status and
+  permits further uploads. FFprobe/FFmpeg retain the file,pipe protocol whitelist.
+  Failed inspection preserves the resumable source. Shutdown aborts child processes
+  and awaits cleanup before database closure. Restart marks interrupted jobs failed;
+  re-upload is required. Pending media cannot be deleted, pruned or streamed.
+  Remaining: durable queue persistence and FFmpeg progress percentage/SSE.
+  Bug-fix verification: build and all 64 tests pass, including real MP4/MKV remux,
+  FIFO/failure isolation, multipart plus resumable uploads, preserved source after
+  inspection failure, and active FFmpeg shutdown/restart cleanup. A 350 MB upload
+  on the target 2 GiB STB still needs a device-level smoke test.
 
-Verification: TypeScript and production UI build; 59 passing API/security/worker,
+Verification: TypeScript and production UI build; 68 passing API/security/worker,
 OpenAPI contract, retention, audit-filter/export, recurring schedule, resumable upload,
 threshold/notification retry and timezone/DST tests; real FFmpeg upload-to-local-RTMP,
 authenticated HLS preview and text/logo overlay integration; database migration tests;
 Linux backup/retention/restore round trip;
-desktop, mobile and tablet Chrome workflows (2 passing browser tests, including
+desktop, mobile and tablet Chrome workflows (3 passing browser tests, including
 theme and language persistence, logo upload/login preview, fixed-count single-video
 playback, backup archive
 navigation, destination probe and enable/disable, webhook configuration/test,

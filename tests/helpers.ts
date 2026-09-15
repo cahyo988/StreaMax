@@ -49,6 +49,8 @@ export function createPngFixture() {
 
 export async function fixture(
   options: {
+    availableDiskBytes?: () => Promise<number>;
+    mediaNormalizer?: typeof import("../server/media.ts").normalize;
     destinationProbe?: (
       address: string,
     ) => Promise<{ transport: "tcp" | "tls" }>;

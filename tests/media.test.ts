@@ -60,7 +60,10 @@ test(
         payload,
       });
       assert.equal(uploaded.statusCode, 201, uploaded.body);
-      const video = uploaded.json();
+      const accepted = uploaded.json();
+      assert.ok(["queued", "processing", "ready"].includes(accepted.status));
+      await until(() => f.store.get("videos", accepted.id)?.status === "ready");
+      const video = f.store.get("videos", accepted.id)!;
       assert.equal(video.audioCodec, "aac");
       assert.equal(video.width, 1280);
       const preview = await f.request("GET", `media/${video.id}`);

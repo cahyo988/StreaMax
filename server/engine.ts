@@ -200,9 +200,12 @@ export class Engine {
     const profile = this.store.get("profiles", stream.profileId);
     if (!playlist?.videoIds.length || !profile)
       throw new Error("Select a nonempty playlist and encoding profile");
-    for (const id of playlist.videoIds)
-      if (!this.store.get("videos", id))
-        throw new Error("Playlist contains missing media");
+    for (const id of playlist.videoIds) {
+      const video = this.store.get("videos", id);
+      if (!video) throw new Error("Playlist contains missing media");
+      if (video.status && video.status !== "ready")
+        throw new Error("Playlist contains media that is not ready");
+    }
     if (!stream.destinationIds.length)
       throw new Error("Select at least one destination");
     for (const id of stream.destinationIds) {

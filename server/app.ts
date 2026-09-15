@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import {
   readFile,
+  copyFile,
   lstat,
   readdir,
   realpath,
@@ -36,7 +37,8 @@ import {
   encrypt,
   tokenHash,
 } from "./security.ts";
-import { normalize } from "./media.ts";
+import { normalize, inspectMedia, needsTranscode } from "./media.ts";
+import { MediaQueue } from "./media-queue.ts";
 import {
   Notifications,
   alertEvents,
@@ -250,6 +252,8 @@ export async function buildApp(
     notificationFetch?: typeof fetch;
     destinationProbe?: (address: string) => Promise<DestinationProbeResult>;
     webhookRequest?: WebhookRequest;
+    availableDiskBytes?: () => Promise<number>;
+    mediaNormalizer?: typeof normalize;
   } = {},
 ) {
   const store = new Store(config.DATA_DIR, config.ENCRYPTION_KEY);
@@ -267,6 +271,13 @@ export async function buildApp(
     options.webhookRequest,
   );
   const testDestination = options.destinationProbe ?? probeDestination;
+  const normalizeMedia = options.mediaNormalizer ?? normalize;
+  const availableDiskBytes =
+    options.availableDiskBytes ??
+    (async () => {
+      const disk = await statfs(config.DATA_DIR);
+      return disk.bavail * disk.bsize;
+    });
   store.onEvent = (actor, action, resource, message) => {
     void notifications.notify(action, actor, resource, message);
     void webhooks.notify(action, actor, resource, message);
@@ -1029,6 +1040,8 @@ export async function buildApp(
 
   function safe(kind: Kind, value: Entity) {
     const { secret, path, ...data } = value;
+    // Legacy library records were saved only after successful normalization.
+    if (kind === "videos") return { ...data, status: data.status ?? "ready" };
     if (kind === "streams")
       return { ...data, outputs: engine.status(value.id) };
     return data;
@@ -1325,6 +1338,8 @@ export async function buildApp(
     app.delete<{ Params: { id: string } }>(`/api/${kind}/:id`, async (req) => {
       const entity = store.get(kind, req.params.id);
       if (!entity) throw problem("Resource not found", 404);
+      if (kind === "videos" && ["queued", "processing"].includes(entity.status))
+        throw problem("Video processing is pending", 409);
       if (isInUse(kind, entity.id, true))
         throw problem("Resource is in use; remove its references first", 409);
       if (kind === "videos")
@@ -1346,46 +1361,157 @@ export async function buildApp(
       return { ok: true };
     });
   }
-  let processing = false;
-  registerUploads(app, store, config, async (temporary, name, actor, ip) => {
-    if (processing)
-      throw problem("Another video is being processed; try again shortly", 409);
-    processing = true;
-    const videoId = randomUUID();
+  const mediaQueue = new MediaQueue();
+  app.addHook("onClose", async () => {
+    await mediaQueue.close();
+  });
+  // Interrupted jobs cannot be resumed safely without a durable job transaction.
+  for (const video of store.list("videos")) {
+    if (["queued", "processing", "uploaded"].includes(video.status)) {
+      store.save("videos", {
+        ...video,
+        status: "failed",
+        error: "Processing interrupted; upload the file again",
+      });
+      await unlink(join(uploadDir, `${video.id}.upload`)).catch(() => {});
+      await unlink(join(mediaDir, `${video.id}.mp4`)).catch(() => {});
+    }
+  }
+  const acceptVideo = async (
+    temporary: string,
+    name: string,
+    actor: string,
+    ip: string,
+  ) => {
+    let inspection;
     try {
-      const metadata = await normalize(config, temporary, videoId);
-      const size = (await stat(metadata.path)).size;
-      const video = store.save("videos", {
+      inspection = await inspectMedia(config, temporary);
+    } catch {
+      throw problem(
+        "Video could not be inspected. Check the file and FFprobe installation.",
+      );
+    }
+    const videoId = randomUUID();
+    const stableInput = join(uploadDir, `${videoId}.upload`);
+    const size = (await stat(temporary)).size;
+    const freeBytes = await availableDiskBytes();
+    const reserved = store
+      .list("videos")
+      .filter((v) => ["queued", "processing"].includes(v.status))
+      .reduce((n, v) => n + Number(v.size || 0) * 2, 0);
+    if (freeBytes < reserved + size * 3 + 100 * 1024 * 1024)
+      throw problem("Insufficient free disk space for processing", 507);
+    let video: Entity;
+    try {
+      // Retain the resumable source until registration succeeds.
+      await copyFile(temporary, stableInput, 1);
+      video = store.save("videos", {
         id: videoId,
         name,
-        ...metadata,
+        ...inspection,
         size,
+        status: "queued",
         createdAt: new Date().toISOString(),
       });
-      store.event(actor, "video.upload", videoId, "", ip, "success", {
-        size,
-        resumable: true,
-      });
-      return safe("videos", video);
-    } catch (error) {
-      await unlink(join(mediaDir, `${videoId}.mp4`)).catch(() => {});
-      throw error;
-    } finally {
-      processing = false;
-    }
-  });
-  app.post("/api/videos", async (req, reply) => {
-    if (processing)
-      throw problem(
-        "Another video is processing. Try again when it finishes.",
-        409,
+      store.event(actor, "video.upload", videoId, "", ip, "success", { size });
+      store.event(
+        actor,
+        "video.processing.queued",
+        videoId,
+        "Video queued",
+        ip,
       );
-    processing = true;
-    const videoId = randomUUID();
-    const temporary = join(uploadDir, `${videoId}.upload`);
+      app.log.info({ videoId }, "Video queued");
+    } catch (error) {
+      await unlink(stableInput).catch(() => {});
+      store.delete("videos", videoId);
+      throw error;
+    }
+    const alreadyBusy = mediaQueue.size() > 0;
+    const result = mediaQueue.enqueue(async (signal) => {
+      try {
+        if (signal.aborted) throw new Error("Interrupted");
+        store.save("videos", { ...video, status: "processing" });
+        store.event(
+          actor,
+          "video.processing.started",
+          video.id,
+          "Video processing started",
+          ip,
+        );
+        app.log.info({ videoId: video.id }, "Video processing started");
+        if (!needsTranscode(inspection)) {
+          store.event(
+            actor,
+            "video.processing.skipped_transcoding",
+            video.id,
+            "Video skipped transcoding; remux only",
+            ip,
+          );
+          app.log.info(
+            { videoId: video.id },
+            "Video skipped transcoding; remux only",
+          );
+        }
+        const metadata = await normalizeMedia(
+          config,
+          stableInput,
+          video.id,
+          inspection,
+          signal,
+        );
+        const size = (await stat(metadata.path)).size;
+        const ready = store.save("videos", {
+          ...video,
+          ...metadata,
+          size,
+          status: "ready",
+        });
+        store.event(
+          actor,
+          "video.processing.complete",
+          video.id,
+          "Video processing completed",
+          ip,
+          "success",
+          { size, transcoded: metadata.transcoded },
+        );
+        app.log.info({ videoId: video.id }, "Video processing completed");
+        return ready;
+      } catch {
+        const failed = store.save("videos", {
+          ...video,
+          status: "failed",
+          error: "Processing failed or was interrupted; upload the file again",
+        });
+        store.event(
+          actor,
+          "video.processing.failed",
+          video.id,
+          "Video processing failed",
+          ip,
+          "failure",
+        );
+        app.log.warn({ videoId: video.id }, "Video processing failed");
+        await unlink(join(mediaDir, `${video.id}.mp4`)).catch(() => {});
+        return failed;
+      } finally {
+        await unlink(stableInput).catch(() => {});
+      }
+    });
+    // Observe background failures even if an audit/database write itself fails.
+    void result.catch(() => app.log.error({ videoId }, "Media job failed"));
+    // Remux is inexpensive, but still uses the same bounded worker lane.
+    return safe(
+      "videos",
+      alreadyBusy || needsTranscode(inspection) ? video : await result,
+    );
+  };
+  registerUploads(app, store, config, acceptVideo, availableDiskBytes);
+  app.post("/api/videos", async (req, reply) => {
+    const temporary = join(uploadDir, `${randomUUID()}.incoming`);
     try {
-      const disk = await statfs(config.DATA_DIR);
-      if (disk.bavail * disk.bsize < config.MAX_UPLOAD_MB * 1024 * 1024 * 2)
+      if ((await availableDiskBytes()) < config.MAX_UPLOAD_MB * 1024 * 1024 * 2)
         throw problem(
           "Insufficient free disk space for upload and processing",
           507,
@@ -1395,43 +1521,23 @@ export async function buildApp(
       await pipeline(file.file, createWriteStream(temporary, { flags: "wx" }));
       if (file.file.truncated)
         throw problem(`Upload exceeds ${config.MAX_UPLOAD_MB} MB`, 413);
-      let metadata;
-      try {
-        metadata = await normalize(config, temporary, videoId);
-      } catch {
-        throw problem(
-          "Video could not be processed. Upload a valid video and check FFmpeg/FFprobe installation.",
-        );
-      }
-      const size = (await stat(metadata.path)).size;
-      const video = store.save("videos", {
-        id: videoId,
-        name: file.filename.replace(/[\\/]/g, "_").slice(0, 120),
-        ...metadata,
-        size,
-        createdAt: new Date().toISOString(),
-      });
-      store.event(
+      const video = await acceptVideo(
+        temporary,
+        file.filename.replace(/[\\/]/g, "_").slice(0, 120),
         req.user!.email,
-        "video.upload",
-        videoId,
-        "",
         req.ip,
-        "success",
-        { size, width: metadata.width, height: metadata.height },
       );
-      return reply.code(201).send(safe("videos", video));
-    } catch (error) {
-      await unlink(join(mediaDir, `${videoId}.mp4`)).catch(() => {});
-      throw error;
+      return reply.code(201).send(video);
     } finally {
       await unlink(temporary).catch(() => {});
-      processing = false;
     }
   });
   app.get<{ Params: { id: string } }>("/api/media/:id", async (req, reply) => {
     if (!store.get("videos", req.params.id))
       throw problem("Video not found", 404);
+    const video = store.get("videos", req.params.id)!;
+    if (video.status && video.status !== "ready")
+      throw problem("Video is not ready", 409);
     return reply.sendFile(`${req.params.id}.mp4`);
   });
   const locks = new Set<string>();
@@ -1634,7 +1740,7 @@ export async function buildApp(
       temperatureC: readTemperatureC(),
       maxOutputs: config.MAX_OUTPUTS,
       retryAttempts: store.get("settings", "system")?.retryAttempts ?? 5,
-      processing,
+      processing: mediaQueue.size() > 0,
       maxUploadMb: config.MAX_UPLOAD_MB,
     };
   });

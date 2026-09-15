@@ -241,6 +241,12 @@ const indonesian: Record<string, string> = {
   "All destinations": "Semua tujuan siaran",
   "All schedules": "Semua jadwal",
   Ready: "Siap",
+  ready: "Siap",
+  queued: "Mengantre",
+  processing: "Diproses",
+  failed: "Gagal",
+  "Upload received; video is queued for processing":
+    "Upload diterima; video mengantre untuk diproses",
   Delete: "Hapus",
   Edit: "Ubah",
   enabled: "aktif",
@@ -828,6 +834,7 @@ function App() {
     setPausedFile(null);
     setUploadProgress(0);
     setError("");
+    let registered = false;
     try {
       const sample = await new Blob([
         file.slice(0, 65536),
@@ -870,11 +877,24 @@ function App() {
         setUploadProgress(Math.floor((offset / file.size) * 100));
       }
       controller.signal.throwIfAborted();
-      await api(`uploads/${session.id}/complete`, {});
+      const completed = await api(`uploads/${session.id}/complete`, {});
+      registered = true;
       uploadSession.current = null;
-      setNotice("Video processed and ready");
+      setNotice(
+        completed.status === "ready"
+          ? "Video processed and ready"
+          : completed.status === "failed"
+            ? "Video processing failed"
+            : "Upload received; video is queued for processing",
+      );
       await refresh();
     } catch (cause) {
+      if (registered) {
+        setError(
+          `Upload received, but library refresh failed: ${(cause as Error).message}`,
+        );
+        return;
+      }
       setPausedFile(file);
       setError(
         controller.signal.aborted
@@ -1421,7 +1441,7 @@ function App() {
                   {page === "videos" ? (
                     <button
                       className="primary"
-                      disabled={uploadProgress !== null || overview.processing}
+                      disabled={uploadProgress !== null}
                       onClick={() => upload.current?.click()}
                     >
                       ＋ {t("Upload video")}
@@ -1680,6 +1700,9 @@ function App() {
                       <article className="media-card" key={video.id}>
                         <button
                           className="video-cover"
+                          disabled={Boolean(
+                            video.status && video.status !== "ready",
+                          )}
                           onClick={() => setPreview(video)}
                           aria-label={`Preview ${video.name}`}
                         >
@@ -1693,11 +1716,23 @@ function App() {
                             {bytes(video.size)}
                           </p>
                           <div>
-                            <span className="badge live">{t("Ready")}</span>
+                            <span
+                              className={`badge ${video.status === "failed" ? "failed" : video.status && video.status !== "ready" ? "offline" : "live"}`}
+                            >
+                              {t(video.status || "Ready")}
+                            </span>
+                            {video.error && (
+                              <small role="status">{video.error}</small>
+                            )}
                             {canEdit && (
                               <button
                                 className="text-button danger-text"
-                                disabled={busy}
+                                disabled={
+                                  busy ||
+                                  ["queued", "processing"].includes(
+                                    video.status,
+                                  )
+                                }
                                 onClick={() => void remove("videos", video)}
                               >
                                 {t("Delete")}
@@ -3312,7 +3347,13 @@ function ResourceModal({
   }, []);
   const options = (type: Kind) =>
     data[type].map((value) => (
-      <option key={value.id} value={value.id}>
+      <option
+        key={value.id}
+        value={value.id}
+        disabled={
+          type === "videos" && Boolean(value.status && value.status !== "ready")
+        }
+      >
         {value.name}
       </option>
     ));

@@ -18,6 +18,10 @@ export function registerUploads(
     owner: string,
     ip: string,
   ) => Promise<unknown>,
+  availableDiskBytes: () => Promise<number> = async () => {
+    const disk = await statfs(config.DATA_DIR);
+    return disk.bavail * disk.bsize;
+  },
 ) {
   store.db.exec(
     "CREATE TABLE IF NOT EXISTS uploads(id TEXT PRIMARY KEY,owner TEXT NOT NULL,name TEXT NOT NULL,size INTEGER NOT NULL,fingerprint TEXT NOT NULL,expires INTEGER NOT NULL)",
@@ -99,13 +103,13 @@ export function registerUploads(
         Date.now() + 86400000,
       );
     try {
-      const disk = await statfs(config.DATA_DIR);
+      const freeBytes = await availableDiskBytes();
       const reserved = Number(
         store.db
           .prepare("SELECT COALESCE(SUM(size),0) AS n FROM uploads")
           .get()!.n,
       );
-      if (disk.bavail * disk.bsize < reserved + 100 * 1024 * 1024)
+      if (freeBytes < reserved + 100 * 1024 * 1024)
         throw problem("Not enough disk space for pending uploads", 507);
       await writeFile(path(id), Buffer.alloc(0), { flag: "wx" });
       return reply.code(201).send({ id, offset: 0 });

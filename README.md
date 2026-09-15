@@ -32,10 +32,15 @@ then run `npm start` and open that address. The server serves `dist/` when prese
 
 ## First broadcast
 
-1. **Video library → Upload video.** One upload/normalization at a time; the browser
-   shows upload progress followed by processing status. Inputs are normalized to
-   720p30 H.264/AAC stereo. Silent videos receive an audio track. Original uploads
-   are removed after processing; the stored video is the normalized rendition.
+1. **Video library → Upload video.** Further uploads are accepted during processing.
+   Multipart and resumable uploads share one FIFO processing worker. Compatible
+   H.264/AAC 48 kHz stereo media up to 720p/30 FPS is remuxed to MP4 without re-encoding;
+   incompatible inputs are normalized to 720p30, with silence added if audio is absent.
+   Watch queued/processing/ready/failed status in the library. Only ready media can
+   be previewed or streamed. Temporary inputs are removed after completion or failure.
+   Shutdown cancels pending work and waits for cleanup; interrupted jobs become failed
+   on restart and require re-upload. Automatic job recovery and percentage progress
+   are not implemented yet.
 2. **Playlists → Create playlist.** Add library videos and reorder using arrows.
    Repeated items are supported. All items must use the managed library.
 3. **Destinations → Create destination.** Paste the provider's ingest server URL
